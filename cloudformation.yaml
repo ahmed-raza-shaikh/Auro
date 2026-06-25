@@ -1,0 +1,222 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Auro — Automated Cloud Compliance Engine
+  Deploys the Lambda function, IAM execution role, EventBridge daily trigger,
+  and CloudWatch Log Group. All resources use only Free Tier services.
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Parameters — override at deploy time:
+#   aws cloudformation deploy \
+#     --template-file cloudformation.yaml \
+#     --stack-name auro-compliance-engine \
+#     --parameter-overrides SlackWebhookUrl=https://hooks.slack.com/... \
+#                           ReportsBucketName=my-compliance-reports \
+#     --capabilities CAPABILITY_NAMED_IAM
+# ──────────────────────────────────────────────────────────────────────────────
+Parameters:
+
+  SlackWebhookUrl:
+    Type: String
+    NoEcho: true
+    Description: Slack Incoming Webhook URL for compliance notifications.
+    Default: ""
+
+  ReportsBucketName:
+    Type: String
+    Description: S3 bucket to store PDF reports. Leave empty to skip uploads.
+    Default: ""
+
+  LambdaMemoryMB:
+    Type: Number
+    Default: 256
+    AllowedValues: [128, 256, 512, 1024]
+    Description: Memory allocation for the Lambda function.
+
+  LambdaTimeoutSeconds:
+    Type: Number
+    Default: 300
+    Description: Lambda execution timeout (max 900).
+
+  ScheduleExpression:
+    Type: String
+    Default: "cron(0 6 * * ? *)"
+    Description: EventBridge cron expression. Default = daily at 06:00 UTC.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 180, 365]
+    Description: CloudWatch Logs retention period in days.
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Resources
+# ──────────────────────────────────────────────────────────────────────────────
+Resources:
+
+  # ── CloudWatch Log Group (explicit — ensures retention policy) ─────────────
+  AuroLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/auro-compliance-engine"
+      RetentionInDays: !Ref LogRetentionDays
+    DeletionPolicy: Retain
+
+  # ── IAM Execution Role ────────────────────────────────────────────────────
+  AuroLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AuroComplianceEngineRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AuroCISChecksPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # S3 compliance checks
+              - Sid: CISCheckS3
+                Effect: Allow
+                Action:
+                  - s3:ListAllMyBuckets
+                  - s3:GetBucketPublicAccessBlock
+                  - s3:GetBucketAcl
+                  - s3:GetBucketPolicyStatus
+                Resource: "*"
+              # IAM compliance checks
+              - Sid: CISCheckIAM
+                Effect: Allow
+                Action:
+                  - iam:GetAccountSummary
+                  - iam:GetAccountPasswordPolicy
+                  - iam:ListVirtualMFADevices
+                  - iam:GenerateCredentialReport
+                  - iam:GetCredentialReport
+                Resource: "*"
+              # CloudTrail compliance checks
+              - Sid: CISCheckCloudTrail
+                Effect: Allow
+                Action:
+                  - cloudtrail:DescribeTrails
+                  - cloudtrail:GetTrailStatus
+                  - cloudtrail:GetEventSelectors
+                Resource: "*"
+              # EC2 Security Group compliance checks
+              - Sid: CISCheckEC2
+                Effect: Allow
+                Action:
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeVpcs
+                Resource: "*"
+              # S3 report upload
+              - Sid: S3ReportUpload
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                Resource: !If
+                  - HasReportsBucket
+                  - !Sub "arn:aws:s3:::${ReportsBucketName}/reports/*"
+                  - !Sub "arn:aws:s3:::placeholder-disabled"
+              # STS for account ID resolution
+              - Sid: STSGetCallerIdentity
+                Effect: Allow
+                Action: sts:GetCallerIdentity
+                Resource: "*"
+      Tags:
+        - Key: Project
+          Value: Auro
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # ── Lambda Function ────────────────────────────────────────────────────────
+  AuroLambdaFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: AuroLogGroup
+    Properties:
+      FunctionName: auro-compliance-engine
+      Description: >
+        Auro — Daily CIS Benchmark compliance checks with PDF reports and Slack alerts.
+      Runtime: python3.12
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt AuroLambdaRole.Arn
+      MemorySize: !Ref LambdaMemoryMB
+      Timeout: !Ref LambdaTimeoutSeconds
+      Code:
+        # Placeholder — replace with actual deployment package S3 location
+        # after running: make package
+        ZipFile: |
+          def lambda_handler(event, context):
+              return {"statusCode": 200, "body": "Deploy the real package."}
+      Environment:
+        Variables:
+          SLACK_WEBHOOK_URL: !Ref SlackWebhookUrl
+          S3_REPORTS_BUCKET: !Ref ReportsBucketName
+          LOG_LEVEL: INFO
+      Layers:
+        # Lambda Layer for ReportLab + requests (built separately with make layer)
+        # Uncomment and replace ARN after creating the layer:
+        # - arn:aws:lambda:us-east-1:123456789012:layer:auro-deps:1
+        []
+      Tags:
+        Project: Auro
+        ManagedBy: CloudFormation
+        CostCenter: Security
+
+  # ── EventBridge Scheduled Rule ─────────────────────────────────────────────
+  AuroScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: auro-daily-compliance-check
+      Description: Triggers Auro Lambda daily at 06:00 UTC for compliance checks.
+      ScheduleExpression: !Ref ScheduleExpression
+      State: ENABLED
+      Targets:
+        - Id: AuroLambdaTarget
+          Arn: !GetAtt AuroLambdaFunction.Arn
+
+  # ── Lambda Permission for EventBridge ─────────────────────────────────────
+  AuroLambdaEventBridgePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AuroLambdaFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AuroScheduleRule.Arn
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Conditions
+# ──────────────────────────────────────────────────────────────────────────────
+Conditions:
+  HasReportsBucket: !Not [!Equals [!Ref ReportsBucketName, ""]]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Outputs
+# ──────────────────────────────────────────────────────────────────────────────
+Outputs:
+
+  LambdaFunctionArn:
+    Description: ARN of the Auro compliance Lambda function.
+    Value: !GetAtt AuroLambdaFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-LambdaArn"
+
+  LambdaRoleArn:
+    Description: ARN of the IAM execution role.
+    Value: !GetAtt AuroLambdaRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-RoleArn"
+
+  EventBridgeRuleArn:
+    Description: ARN of the EventBridge schedule rule.
+    Value: !GetAtt AuroScheduleRule.Arn
+
+  CloudWatchLogGroup:
+    Description: CloudWatch Log Group for Lambda output.
+    Value: !Ref AuroLogGroup
