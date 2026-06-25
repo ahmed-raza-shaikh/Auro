@@ -51,49 +51,73 @@ Auro is a fully automated, **serverless cloud security compliance engine** built
 
 ## 2. Architecture
 
+```mermaid
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'background': '#0D1117',
+    'primaryColor': '#1F6FEB',
+    'primaryTextColor': '#E6EDF3',
+    'primaryBorderColor': '#30363D',
+    'lineColor': '#8B949E',
+    'secondaryColor': '#161B22',
+    'tertiaryColor': '#161B22'
+  }
+}}%%
+graph TD
+    %% Trigger Source
+    subgraph Trigger ["Trigger Source"]
+        EB["⏰ Amazon EventBridge<br><code>cron(0 6 * * ? *)</code>"]
+    end
+
+    %% Serverless Execution Environment
+    subgraph Lambda ["AWS Lambda (auro-compliance-engine)"]
+        Orch["🎯 lambda_function.py<br><i>Pipeline Orchestrator</i>"]
+        Checks["🔍 cis_checks.py<br><i>Modular Boto3 Audits</i>"]
+        PDF["📄 pdf_generator.py<br><i>ReportLab PDF Engine</i>"]
+        Temp["💾 Lambda /tmp<br><i>Local PDF Storage</i>"]
+    end
+
+    %% Target AWS APIs
+    subgraph AWS_APIs ["Read-Only Security Audits"]
+        S3_API["S3 API<br><i>Public Access Block / Policies / ACLs</i>"]
+        IAM_API["IAM API<br><i>Root MFA / Credential Report / Password Policy</i>"]
+        CT_API["CloudTrail API<br><i>Multi-Region / Log Status / Event Selectors</i>"]
+        EC2_API["EC2 API<br><i>Security Group Ingress Rules</i>"]
+    end
+
+    %% Output Destinations
+    subgraph Outputs ["Automated Outputs"]
+        S3["🪣 Amazon S3<br><code>reports/YYYY/MM/DD/</code>"]
+        Slack["💬 Slack Webhook<br><i>Block Kit Alert</i>"]
+        CW["📝 CloudWatch Logs<br><i>Structured JSON Trail</i>"]
+    end
+
+    %% Flows
+    EB -->|1. Scheduled Event| Orch
+    Orch -->|2. Runs Audits| Checks
+    Checks -->|Queries| S3_API
+    Checks -->|Queries| IAM_API
+    Checks -->|Queries| CT_API
+    Checks -->|Queries| EC2_API
+    Checks -->|3. Returns Findings| Orch
+    Orch -->|4. Generates Report| PDF
+    PDF -->|5. Writes PDF| Temp
+    Temp -->|6. Uploads PDF| S3
+    Orch -->|7. Pushes Alert| Slack
+    Orch -->|8. Writes Audit Logs| CW
+
+    %% Styling
+    classDef default fill:#161B22,stroke:#30363D,color:#E6EDF3,stroke-width:1px;
+    classDef trigger fill:#1f2937,stroke:#1F6FEB,color:#E6EDF3,stroke-width:2px;
+    classDef orchestrator fill:#1f2937,stroke:#39D353,color:#E6EDF3,stroke-width:2px;
+    classDef output fill:#1f2937,stroke:#bc8cff,color:#E6EDF3,stroke-width:1.5px;
+    
+    class EB trigger;
+    class Orch orchestrator;
+    class S3,Slack,CW output;
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                      Amazon EventBridge                          │
-│              cron(0 6 * * ? *)  — Daily at 06:00 UTC            │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │  Scheduled trigger
-                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    AWS Lambda Function                           │
-│                  auro-compliance-engine                          │
-│                  Runtime: Python 3.12 | 256 MB | 5 min          │
-│                                                                  │
-│  ┌────────────────────┐   ┌────────────────────────────────┐   │
-│  │  lambda_function.py │   │         cis_checks.py          │   │
-│  │  ─ Orchestrator    │──▶│  ─ check_root_mfa_and_usage()  │   │
-│  │  ─ S3 upload       │   │  ─ check_iam_password_policy() │   │
-│  │  ─ Slack dispatch  │   │  ─ check_cloudtrail_config()   │   │
-│  └────────────────────┘   │  ─ check_s3_public_access()    │   │
-│            │              │  ─ check_security_groups()     │   │
-│            │              └────────────────────────────────┘   │
-│            │                                                     │
-│            │              ┌────────────────────────────────┐   │
-│            └─────────────▶│       pdf_generator.py         │   │
-│                           │  ─ ReportLab BaseDocTemplate   │   │
-│                           │  ─ Dark design system          │   │
-│                           │  ─ Writes to Lambda /tmp       │   │
-│                           └────────────────────────────────┘   │
-└───────────────────┬──────────────────────┬──────────────────────┘
-                    │                      │
-          ┌─────────▼──────────┐  ┌────────▼────────────┐
-          │    Amazon S3       │  │    Slack Webhook      │
-          │  PDF Report Store  │  │  Block Kit Payload    │
-          │  /reports/YYYY/MM  │  │  Compliance Summary   │
-          │  /DD/<report>.pdf  │  │  + Direct S3 Link     │
-          └────────────────────┘  └─────────────────────┘
-                    │
-          ┌─────────▼──────────┐
-          │  AWS CloudWatch    │
-          │  Structured Logs   │
-          │  (auto-retained    │
-          │   30 days)         │
-          └────────────────────┘
-```
+
 
 **Data Flow:**
 
